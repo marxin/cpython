@@ -1860,6 +1860,37 @@ class PyPrint(gdb.Command):
                               gdb.COMMAND_DATA,
                               gdb.COMPLETE_NONE)
 
+    @classmethod
+    def tokenize_square_brackets(self, expr):
+        '''
+        Tokenize single expression of an array index of key of a dictionary
+        if used
+        '''
+        while '[' in expr:
+            s = expr.find('[')
+            e = expr.find(']')
+            if e == -1:
+                raise Exception("Can't find closing bracket")
+
+            name = expr[:s]
+            if name != '':
+                yield name
+
+            yield expr[s + 1:e]
+            expr = expr[e + 1:]
+
+        if expr != '':
+            yield expr
+
+    @classmethod
+    def tokenize_expression(self, expr):
+        '''
+        Tokenize expression into parts where part can be either subexpression
+        using dot notation.  Or index into an array or key of a dictionary.
+        '''
+        for part in expr.split('.'):
+            for token in self.tokenize_square_brackets(part):
+                yield token
 
     def invoke(self, args, from_tty):
         name = str(args)
@@ -1874,15 +1905,47 @@ class PyPrint(gdb.Command):
             print('Unable to read information on python frame')
             return
 
-        pyop_var, scope = pyop_frame.get_var_by_name(name)
-
-        if pyop_var:
+        obj = None
+        for field in self.tokenize_expression(name):
+            if obj is None:
+                obj, scope = pyop_frame.get_var_by_name(field)
+            else:
+                try:
+                    obj = self.get_object_field(obj, field)
+                except LookupError:
+                    print("Can't find field %s of %s" % (field, obj))
+                    return
+        if obj:
             print('%s %r = %s'
                    % (scope,
                       name,
-                      pyop_var.get_truncated_repr(MAX_OUTPUT_LEN)))
+                      obj.get_truncated_repr(MAX_OUTPUT_LEN)))
         else:
             print('%r not found' % name)
+
+    def get_object_field(self, obj, field):
+        '''
+        Based on type of object, return field of the object
+        '''
+        if isinstance(obj, PyListObjectPtr) or isinstance(obj, PyTupleObjectPtr):
+            # field must be an integer index
+            index = int(field)
+            return PyObjectPtr.from_pyobject_ptr(obj[index])
+
+        dictionary = None
+        if isinstance(obj, PyDictObjectPtr):
+            dictionary = obj
+        elif isinstance(obj, HeapTypeObjectPtr):
+            dictionary = obj.get_attr_dict()
+        else:
+            raise LookupError()
+
+        for k, pyop_var in dictionary.iteritems():
+            key_name = k.proxyval(set())
+            if key_name == field:
+                return pyop_var
+
+        raise LookupError()
 
 PyPrint()
 
